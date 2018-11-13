@@ -1,34 +1,116 @@
 /*
- * main.c
+ * GccApplication2.c
  *
- * Created: 6/1/2018
- * Author : Derek A Sayler
- *
- * Prototype Master uC code for Smart Garden 2.0
- * Reads in sensor data and determins which pot needs watering
+ * Created: 11/11/2018 10:58:04 AM
+ * Author : Derek
  */ 
+
+#define F_CPU 8000000UL
 
 #include <avr/io.h>
 #include <avr/interrupt.h>
-#include "io.c"
+#include <usart_ATmega1284.h>
+#include <stdio.h>
 #include <string.h>
+#include <limits.h>
+#include <util/delay.h>
+#include "io.c"
 
-#define Temp_Pin 0x00
-#define SM_Pin 0x01
+// A structure to represent a queue
+struct Queue
+{
+	int front, rear, size;
+	unsigned capacity;
+	int* array;
+};
 
-//--Global Vars--------------------------------
-unsigned long taskPeriod = 250;
-	
-uint16_t tempVal; //Global value for temperature
-uint16_t smVal; //Global value for soil moisture
-uint16_t tmpVal;
+// function to create a queue of given capacity.
+// It initializes size of queue as 0
+struct Queue* createQueue(unsigned capacity)
+{
+	struct Queue* queue = (struct Queue*) malloc(sizeof(struct Queue));
+	queue->capacity = capacity;
+	queue->front = queue->size = 0;
+	queue->rear = capacity - 1;  // This is important, see the enqueue
+	queue->array = (int*) malloc(queue->capacity * sizeof(int));
+	return queue;
+}
 
-char tempDisp[4];//String use to display temperature
-char smDisp[4];//String use to display soil moisture levels
-unsigned char servoDisp;
-//---------------------------------------------
+// Queue is full when size becomes equal to the capacity
+int isFull(struct Queue* queue)
+{  return (queue->size == queue->capacity);  }
+
+// Queue is empty when size is 0
+int isEmpty(struct Queue* queue)
+{  return (queue->size == 0); }
+
+int inQueue(struct Queue* queue, int n)
+{
+	for(unsigned char i = 0; i < queue->size; ++i)
+	{
+		if(queue->array[i] == n)
+		{
+			return 1;
+		}
+	}
+	return 0;
+}
+
+// Function to add an item to the queue.
+// It changes rear and size
+void enqueue(struct Queue* queue, int item)
+{
+	if (isFull(queue) || inQueue(queue, item))
+		return;
+	queue->rear = (queue->rear + 1)%queue->capacity;
+	queue->array[queue->rear] = item;
+	queue->size = queue->size + 1;
+}
+
+// Function to remove an item from queue.
+// It changes front and size
+int dequeue(struct Queue* queue)
+{
+	if (isEmpty(queue))
+		return 0;
+	int item = queue->array[queue->front];
+	queue->front = (queue->front + 1)%queue->capacity;
+	queue->size = queue->size - 1;
+	return item;
+}
+
+// Function to get front of queue
+int front(struct Queue* queue)
+{
+	if (isEmpty(queue))
+		return INT_MIN;
+	return queue->array[queue->front];
+}
+
+// Function to get rear of queue
+int rear(struct Queue* queue)
+{
+	if (isEmpty(queue))
+		return INT_MIN;
+	return queue->array[queue->rear];
+}
+
+void displayQueue(struct Queue* queue)
+{
+	LCD_ClearScreen();
+	LCD_DisplayString(1, "Enqueued");
+	unsigned char cursor = 17;
+	for(unsigned i = 0; i < queue->size; ++i)
+	{
+		char tmp = (char) queue->array[(queue->front + i)];
+		LCD_Cursor(cursor);
+		LCD_WriteData(tmp + '0');
+		cursor = cursor + 2;
+	}
+}
 
 volatile unsigned char TimerFlag = 0;
+
 // Internal variables for mapping AVR's ISR to our cleaner TimerISR model.
 unsigned long _avr_timer_M = 1;         // Start count from here, down to 0. Default 1 ms.
 unsigned long _avr_timer_cntcurr = 0;   // Current internal count of 1ms ticks
@@ -66,7 +148,7 @@ void TimerOff()
 
 void TimerISR()
 {
-	TimerFlag = 1;	
+	TimerFlag = 1;
 }
 
 // In our approach, the C programmer does not touch this ISR, but rather TimerISR()
@@ -88,217 +170,211 @@ void TimerSet(unsigned long M)
 	_avr_timer_cntcurr = _avr_timer_M;
 }
 
-//Initializes ADC with 128 prescaler
-void ADC_Init() {
-	ADCSRA |= (1<<ADEN) | (1<<ADPS0) | (1<<ADPS1) | (1<<ADPS2);
-	// ADEN: setting this bit enables analog-to-digital conversion.
-	// ADPS0 ADPS1 ADPS3 prescaler to 128
+//Dir pin C0 (0x01)
+void changeDir(unsigned char dir){
+	dir = (dir & 0x01);
+	PORTC = dir ? PORTC | 0x01 : PORTC & ~0x01;
+	_delay_us(1.30);//Needs 650 ns for stabilization
+	return;
 }
 
-//Reads in ADC value at pin number less than or equal to 7
-uint16_t ADC_Read(unsigned char pinNum)
-{	
-	pinNum = pinNum & 0x07;//Make sure its 7 or less
-	
-	//Set mux to input pin number
-	ADMUX = (ADMUX & 0xF8) | pinNum;
-	
-	// Set single conversion bit
-	ADCSRA |= (1<<ADSC);
-	
-	//wait for conversion to end.
-	//ADSC bit of ADCSRA is set low when conversion is complete
-	while(ADCSRA & (1<<ADSC));
-	
-	return ADC;
+//Step Pin C1 (0x02)
+void step(){
+	PORTC |= 0x02;
+	_delay_us(2.0); //Min delay of 2 microseconds for step pulse
+	PORTC &= 0xFD;
+	_delay_us(2.0);
 }
 
-//Displays input from sensors and fan setting.
-enum Display_States{Disp_Start, Disp_Write} Display_State;
-void TickFct_Display()
+enum buttonStates {buttonStart, buttonWait, buttonPressed} buttonState;
+void buttonSM(struct Queue* queue)
 {
-	switch (Display_State)
+	unsigned char b1 = (PINB & 0x01);
+	unsigned char b2 = (PINB & 0x02);
+	unsigned char b3 = (PINB & 0x04);
+	
+	
+	switch(buttonState)
 	{
-		case Disp_Start:
-			LCD_DisplayStringNC(1, "Moisture:");
-			LCD_DisplayStringNC(17,"Temp:");
-			Display_State = Disp_Write;
+		case buttonStart:
+			buttonState = buttonWait;
 			break;
-		case Disp_Write:
-			LCD_DisplayStringNC(10, smDisp);
-			LCD_Cursor((10+strlen(smDisp)));
-			LCD_WriteData(' ');
-			LCD_DisplayStringNC(22, tempDisp);
-			LCD_Cursor((22+strlen(tempDisp)));
-			LCD_WriteData('C');
-			LCD_Cursor(16);
-			Display_State = Disp_Write;
-			break;
-		default:
-			Display_State = Disp_Start;
-			break;
-	}
-}
-
-//Reads in smVal and determines its percentage. The soil moisture sensor returns voltage VIN amount equal to VREF when no soil or in air. 
-//The equation that determins this is (Vin * 1024)/Vref. The percentages are every 5%.
-void Set_SMPercentage() 
-{
-	if(smVal > 1000)
-	{
-		strcpy(smDisp, "0%");
-	}
-	else if(smVal > 950)
-	{
-		strcpy(smDisp, "5%");
-	}
-	else if(smVal > 900)
-	{
-		strcpy(smDisp, "10%");
-	}
-	else if(smVal > 850)
-	{
-		strcpy(smDisp, "15%");
-	}
-	else if(smVal > 800)
-	{
-		strcpy(smDisp, "20%");
-	}
-	else if(smVal > 750)
-	{
-		strcpy(smDisp, "25%");
-	}
-	else if(smVal > 700)
-	{
-		strcpy(smDisp, "30%");
-	}
-	else if(smVal > 650)
-	{
-		strcpy(smDisp, "35%");
-	}
-	else if(smVal > 600)
-	{
-		strcpy(smDisp, "40%");
-	}
-	else if(smVal > 550)
-	{
-		strcpy(smDisp, "45%");
-	}
-	else if(smVal > 500)
-	{
-		strcpy(smDisp, "50%");
-	}
-	else if(smVal > 450)
-	{
-		strcpy(smDisp, "55%");
-	}
-	else if(smVal > 400)
-	{
-		strcpy(smDisp, "60%");
-	}
-	else if(smVal > 350)
-	{
-		strcpy(smDisp, "65%");
-	}
-	else if(smVal > 300)
-	{
-		strcpy(smDisp, "70%");
-	}
-	else if(smVal > 250)
-	{
-		strcpy(smDisp, "75%");
-	}
-	else if(smVal > 200)
-	{
-		strcpy(smDisp, "80%");
-	}
-	else if(smVal > 150)
-	{
-		strcpy(smDisp, "85%");
-	}
-	else if(smVal > 100)
-	{
-		strcpy(smDisp, "90%");
-	}
-	else if(smVal > 50)
-	{
-		strcpy(smDisp, "95%");
-	}
-	else
-	{
-		strcpy(smDisp, "100%");
-	}
-}
-
-//Reads in temperature and soil moisture sensors on alternating states
-enum Sensor_States{Sensor_Start, Temp_Read, SM_Read} Sensor_State;
-unsigned char i = 1;
-void TickFct_Sensor()
-{	
-	switch(Sensor_State)
-	{
-		case Sensor_Start:
-			tempVal = 0;
-			tempDisp[0] = '0';
-			smVal = 0;
-			smDisp[0] = '0';
-			i = 1;
-			Sensor_State = SM_Read;
-			break;
-		case Temp_Read:
-			tempVal = (ADC_Read(0x00))/2;//Temp pin is on PA0
-			itoa(tempVal, tempDisp, 10);
-			Sensor_State =SM_Read;
-			break;
-		case SM_Read:
-			smVal = ADC_Read(0x01);//Temp Pin is on PA1
-			Set_SMPercentage();
-			if(smVal > 960 && smVal < 700){
-				//if moisture level is between 5% and 30% water
-				//TODO: Send which pot needs watering
+		case buttonWait:
+			if(!b1 && !b2 && !b3)
+			{
+				buttonState = buttonWait;
 			}
-			Sensor_State = Temp_Read;
+			if(isFull(queue))
+			{
+				break;
+			}
+			else if(!b1)
+			{
+				buttonState = buttonPressed;
+				enqueue(queue, 1);
+			}
+			else if(!b2)
+			{
+				buttonState = buttonPressed;
+				enqueue(queue, 2);
+			}
+			else if(!b3)
+			{
+				buttonState = buttonPressed;
+				enqueue(queue, 3);
+			}
+			break;
+		case buttonPressed:
+			if(b1 && b2 && b3)
+			{
+				buttonState = buttonWait;
+			}
 			break;
 		default:
-			smVal = 0;
-			smDisp[0] = '0';
-			tempVal = 0;
-			tempDisp[0] = '0';
-			Sensor_State = Sensor_Start;
+			buttonState = buttonStart;
+			break;
+	}
+}
+enum masterStates {masterStart, masterSend, masterWait} masterState;
+unsigned char bit = 0;
+char tmpM = 0;
+void masterSM(struct Queue* queue)
+{
+	switch(masterState)
+	{
+		case masterStart:
+			masterState = masterSend;
+			break;
+		case masterSend:
+			if(USART_IsSendReady(0) && !(isEmpty(queue)) && USART_HasReceived(0))
+			{
+				if(USART_Receive(0) == 0xFF)
+				{
+					tmpM = (char) dequeue(queue);
+					USART_Send(tmpM, 0);
+					masterState = masterWait;
+					break;
+				}
+			}
+			masterState = masterSend;
+			break;
+		case masterWait:
+			if(USART_HasTransmitted(0))
+			{
+				masterState = masterSend;
+				break;
+			}
+			masterState = masterWait;
+			break;
+		default:
+			masterState = masterStart;
+			break;
 	}
 }
 
-//Function that initializes states and microcontroller functionalities
-void Tasks_Init()
+unsigned char choice = 1;
+char tmpF = 0;
+enum followerStates {followerStart, followerReady, followerWait} followerState;
+void followerSM()
 {	
-	Display_State = Disp_Start;
-	Sensor_State = Sensor_Start;
+	switch(followerState)
+	{
+		case followerStart:
+			choice = 1;
+			followerState = followerWait;
+			break;
+		case followerWait:
+			if(USART_HasReceived(0))
+			{
+				followerState = followerReady;
+			}
+			else if(USART_IsSendReady(0))
+			{
+				USART_Send(0xFF, 0);		
+				followerState = followerWait;
+			}
+			break;
+		case followerReady:
+			tmpF = USART_Receive(0);
+			//TODO: CNC logic
+			if(tmpF == 1)
+			{
+				PORTB = 0x01;
+			}
+			else if(tmpF == 2)
+			{
+				PORTB = 0x02;
+			}
+			else if(tmpF == 3)
+			{
+				PORTB = 0x04;
+			}
+			followerState = followerWait;
+			break;
+		default:
+			followerState = followerStart;
+			break;
+	}
 	
-	LCD_init();//Initializes LCD settings
-	ADC_Init();//Initializes ADC settings
-	TimerOn();//Initializes Timer Settings
-	TimerSet(taskPeriod);//Set Period
 }
 
 int main(void)
 {
-	DDRA = 0x00; PORTA = 0x00;//Inputs for Soil Moisture(PA1) and Temp Sensors(PA0)
-	DDRD = 0xC0; PORTD = 0x00;//LCD output PB0 & PB1 and Servo PWM at PB6
-	DDRC = 0xFF; PORTC = 0x00;//LCD outputs PC0 - PC7
-	//Initialize 
-	unsigned char i = 0;
-	Tasks_Init();
+    // TODO config ports
 	
-    while (1) 
-	{
-		TickFct_Sensor();
-		if(i>=2)
+	//Master Configs
+	//DDRB = 0x07; PORTB = 0x07;
+	//DDRC = 0xFF; PORTC = 0x00;
+	//DDRD = 0xC0; PORTD = 0x00;
+	
+	//Follower Configs
+	DDRA = 0x00; PORTA = 0x00;
+	DDRB = 0x07; PORTB = 0x00;
+	DDRC = 0x03; PORTC = 0x00;
+	DDRD = 0x00; PORTD = 0x00;
+    
+    masterState = masterStart;
+	followerState = followerStart;
+	buttonState = buttonStart;
+    
+    // Set the timer and turn it on
+    TimerSet(100);
+    TimerOn();
+	
+	//Init Queue
+	//struct Queue* q = createQueue(3);
+	initUSART(0);
+	LCD_init();
+	LCD_DisplayString(1, "Enqueued");
+	
+	
+	//enqueue(q, 1);
+	//enqueue(q, 3);
+	//enqueue(q, 1);
+	//enqueue(q, 2);
+	
+	unsigned char count = 0;
+	
+    while(1)
+    {
+		unsigned char ss1 = (PINA & 0x01);
+		//buttonSM(q);
+		if(count >= 10)
 		{
-			TickFct_Display();
-			i = 0;
+			//displayQueue(q);
+			//masterSM(q);
+			followerSM();
+			count = 0;
+			if(ss1)
+			{
+				step();
+			}
 		}
-		++i;
-		while(!TimerFlag){}
-		TimerFlag = 0;
-	}
+		++count;
+	    while(!TimerFlag);
+	    TimerFlag = 0;
+    }
+    
+    return 0;
 }
+
