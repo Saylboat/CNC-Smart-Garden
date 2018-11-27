@@ -176,14 +176,15 @@ void stepperFunct(int stepNum){
 	}
 	PORTC = 0x03;//Turn on water pump
 	PORTB = 0x01;
-	_delay_ms(1000.0);
+	_delay_ms(750.0);
 	PORTB = 0x03;
-	_delay_ms(1000.0);
+	_delay_ms(750.0);
 	PORTB = 0x07;
-	_delay_ms(1000.0);
+	_delay_ms(750.0);
 	PORTB = 0x0F;
-	_delay_ms(1000.0);
-	PORTC = 0x01;
+	_delay_ms(750.0);
+	PORTB = 0x00;
+	PORTC = 0x01;//turn off pump but keep led grow light
 }
 
 void stepperLogic(unsigned char nextPos){
@@ -215,7 +216,6 @@ void followerSM()
 	switch(followerState)
 	{
 		case followerStart:
-			_delay_ms(4000.0);
 			cli();
 			goHome();
 			sei();

@@ -221,7 +221,12 @@ void displayQueueSM(struct Queue* queue)
 	LCD_ClearScreen();
 	LCD_DisplayString(1, "Current: ");
 	LCD_Cursor(10);
-	LCD_WriteData(workingOn + '0');
+	if(workingOn == 0){
+		LCD_DisplayStringNC(10, "Home");
+	}
+	else{
+		LCD_WriteData(workingOn + '0');
+	}
 	LCD_DisplayStringNC(17, "Ready: ");
 	unsigned char cursor = 24;
 	for(unsigned i = 0; i < queue->size; ++i)
@@ -422,22 +427,30 @@ void buttonSM(struct Queue* queue)
 			else if(!b2)
 			{
 				buttonState = buttonPressed;
-				enqueue(queue, 1);
+				if(workingOn != 1){
+					enqueue(queue, 1);
+				}
 			}
 			else if(!b3)
 			{
 				buttonState = buttonPressed;
-				enqueue(queue, 2);
+				if(workingOn != 2){
+					enqueue(queue, 2);
+				}
 			}
 			else if(!b4)
 			{
 				buttonState = buttonPressed;
-				enqueue(queue, 3);
+				if(workingOn != 3){
+					enqueue(queue, 3);
+				}
 			}
 			else if(!b5)
 			{
 				buttonState = buttonPressed;
-				enqueue(queue, 4);
+				if(workingOn != 4){
+					enqueue(queue, 4);
+				}
 			}
 			break;
 		case buttonPressed:
